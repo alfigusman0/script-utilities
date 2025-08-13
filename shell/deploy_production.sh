@@ -19,6 +19,7 @@ repos=(
     "/var/www/folder/api|NodeJS"
     "/var/www/folder/backend|CI3"
     "/var/www/folder/frontend|ReactJS"
+    "/var/www/folder/test|*"
 )
 
 echo "[$(date)] Starting update and deploy process for ${#repos[@]} repositories" >> "$LOG_FILE"
@@ -35,7 +36,6 @@ do
     # Fetch latest changes without merging
     git fetch origin production >> "$LOG_FILE" 2>&1
 
-
     # Check if local branch is behind origin/production
     LOCAL=$(git rev-parse HEAD)
     REMOTE=$(git rev-parse origin/production)
@@ -49,7 +49,7 @@ do
             # Check for changes in composer.json
             if git diff --name-only "$LOCAL" "$REMOTE" | grep -E 'composer.json'; then
                 echo "[$(date)] Changes detected in composer.json, running composer update..." >> "$LOG_FILE"
-                COMPOSER_ALLOW_SUPERUSER=1 composer install >> "$LOG_FILE" 2>&1 || { echo "[$(date)] Composer update failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
+                COMPOSER_ALLOW_SUPERUSER=1 composer install >> "$LOG_FILE" 2>&1 || { echo "[$(date)] Composer install failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
                 COMPOSER_ALLOW_SUPERUSER=1 composer update >> "$LOG_FILE" 2>&1 || { echo "[$(date)] Composer update failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
             else
                 echo "[$(date)] No changes in composer.json, skipping composer update." >> "$LOG_FILE"
@@ -84,13 +84,13 @@ do
             fi
             ;;
         *)
-            echo "[$(date)] Unknown repository type: ${repo_type}, skipping processing." >> "$LOG_FILE"
+            echo "[$(date)] Repository type is * or unknown (${repo_type}), only pulling from GitHub." >> "$LOG_FILE"
             ;;
         esac
     else
         echo "[$(date)] No updates available for ${repo_path}, skipping pull and processing." >> "$LOG_FILE"
     fi
-        echo "[$(date)] ******************************************" >> "$LOG_FILE"
+    echo "[$(date)] ******************************************" >> "$LOG_FILE"
 done
 
 echo "[$(date)] Update and deploy process completed" >> "$LOG_FILE"

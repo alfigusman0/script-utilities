@@ -20,7 +20,7 @@ pool 2.id.pool.ntp.org iburst
 pool 3.id.pool.ntp.org iburst
 
 # Allow local system clock fallback
-fallbackdrift
+#fallbackdrift
 
 # Local hardware clock (RTC)
 rtcsync

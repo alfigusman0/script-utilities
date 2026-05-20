@@ -2,19 +2,29 @@
 
 # Log file for cronjob
 LOG_FILE="/root/report.txt"
+MAX_LOG_SIZE=5242880  # 5MB
 
-# Load nvm
+# ── Rotate log if too large ──────────────────────────────────────────────────
+if [ -f "$LOG_FILE" ] && [ "$(stat -c%s "$LOG_FILE")" -ge "$MAX_LOG_SIZE" ]; then
+    mv "$LOG_FILE" "${LOG_FILE}.$(date +%Y%m%d%H%M%S).bak"
+fi
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# ── Load nvm ─────────────────────────────────────────────────────────────────
 export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || printf %s "${XDG_CONFIG_HOME}/nvm")"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-nvm use --lts >> "$LOG_FILE" 2>&1
+
+nvm use --lts >> "$LOG_FILE" 2>&1 || { log "ERROR: nvm use --lts failed"; exit 1; }
 
 # Verify node and npm
-node -e "console.log('hello')" >> "$LOG_FILE" 2>&1
-node --version >> "$LOG_FILE" 2>&1
-npm --version >> "$LOG_FILE" 2>&1
+node -e "console.log('Node OK')" >> "$LOG_FILE" 2>&1
+log "Node: $(node --version) | npm: $(npm --version)"
 export NODE_OPTIONS=--max-old-space-size=8192
 
-# Define repositories and their types
+# ── Repository list ──────────────────────────────────────────────────────────
 repos=(
     "/var/www/folder/api|NodeJS"
     "/var/www/folder/backend|CI3"
@@ -22,75 +32,100 @@ repos=(
     "/var/www/folder/test|*"
 )
 
-echo "[$(date)] Starting update and deploy process for ${#repos[@]} repositories" >> "$LOG_FILE"
+log "Starting deploy process for ${#repos[@]} repo(s)"
 
-for repo_entry in "${repos[@]}"
-do
-    # Split repo path and type
-    repo_path=$(echo "$repo_entry" | cut -d'|' -f1)
-    repo_type=$(echo "$repo_entry" | cut -d'|' -f2)
+# ── Main loop ────────────────────────────────────────────────────────────────
+for repo_entry in "${repos[@]}"; do
+    repo_path="${repo_entry%%|*}"
+    repo_type="${repo_entry##*|}"
 
-    echo "[$(date)] ****** Processing repository: ${repo_path} (Type: ${repo_type}) ******" >> "$LOG_FILE"
-    cd "${repo_path}" || { echo "[$(date)] Failed to change to ${repo_path}" >> "$LOG_FILE"; exit 1; }
+    log "====== Processing: ${repo_path} (${repo_type}) ======"
 
-    # Fetch latest changes without merging
-    git fetch origin production >> "$LOG_FILE" 2>&1
-
-    # Check if local branch is behind origin/production
-    LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse origin/production)
-    if [ "$LOCAL" != "$REMOTE" ]; then
-        echo "[$(date)] Updates available, pulling changes from origin/production" >> "$LOG_FILE"
-        git pull origin production >> "$LOG_FILE" 2>&1 || { echo "[$(date)] Git pull failed for ${repo_path}" >> "$LOG_FILE"; exit 1; }
-
-        # Handle based on repository type
-        case "$repo_type" in
-        "CI3")
-            # Check for changes in composer.json
-            if git diff --name-only "$LOCAL" "$REMOTE" | grep -E 'composer.json'; then
-                echo "[$(date)] Changes detected in composer.json, running composer update..." >> "$LOG_FILE"
-                COMPOSER_ALLOW_SUPERUSER=1 composer install >> "$LOG_FILE" 2>&1 || { echo "[$(date)] Composer install failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
-                COMPOSER_ALLOW_SUPERUSER=1 composer update >> "$LOG_FILE" 2>&1 || { echo "[$(date)] Composer update failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
-            else
-                echo "[$(date)] No changes in composer.json, skipping composer update." >> "$LOG_FILE"
-            fi
-            ;;
-        "NodeJS")
-            # Check for changes in package.json
-            if git diff --name-only "$LOCAL" "$REMOTE" | grep -E 'package.json'; then
-                echo "[$(date)] Changes detected in package.json, running npm update..." >> "$LOG_FILE"
-                npm install >> "$LOG_FILE" 2>&1 || { echo "[$(date)] npm install failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
-                npm update >> "$LOG_FILE" 2>&1 || { echo "[$(date)] npm update failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
-            else
-                echo "[$(date)] No changes in package.json, skipping npm update." >> "$LOG_FILE"
-            fi
-            ;;
-        "ReactJS")
-            # Check for changes in package.json
-            if git diff --name-only "$LOCAL" "$REMOTE" | grep -E 'package.json'; then
-                echo "[$(date)] Changes detected in package.json, running npm install..." >> "$LOG_FILE"
-                npm install >> "$LOG_FILE" 2>&1 || { echo "[$(date)] npm install failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
-                npm update >> "$LOG_FILE" 2>&1 || { echo "[$(date)] npm update failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
-            else
-                echo "[$(date)] No changes in package.json, skipping npm install." >> "$LOG_FILE"
-            fi
-
-            # Check for any changes in the frontend directory
-            if git diff --name-only "$LOCAL" "$REMOTE"; then
-                echo "[$(date)] Changes detected in ${repo_path}, running npm run build..." >> "$LOG_FILE"
-                npm run build >> "$LOG_FILE" 2>&1 || { echo "[$(date)] Build failed in ${repo_path}" >> "$LOG_FILE"; exit 1; }
-            else
-                echo "[$(date)] No changes in ${repo_path}, skipping npm run build." >> "$LOG_FILE"
-            fi
-            ;;
-        *)
-            echo "[$(date)] Repository type is * or unknown (${repo_type}), only pulling from GitHub." >> "$LOG_FILE"
-            ;;
-        esac
-    else
-        echo "[$(date)] No updates available for ${repo_path}, skipping pull and processing." >> "$LOG_FILE"
+    # Validate directory
+    if [ ! -d "$repo_path" ]; then
+        log "ERROR: Directory not found: ${repo_path}, skipping."
+        continue
     fi
-    echo "[$(date)] ******************************************" >> "$LOG_FILE"
+
+    cd "$repo_path" || { log "ERROR: Cannot cd into ${repo_path}"; continue; }
+
+    # ── Git fetch & compare ──────────────────────────────────────────────────
+    git fetch origin production >> "$LOG_FILE" 2>&1 || { log "ERROR: git fetch failed for ${repo_path}"; continue; }
+
+    LOCAL=$(git rev-parse HEAD)
+    REMOTE=$(git rev-parse origin/production 2>/dev/null)
+
+    if [ -z "$REMOTE" ]; then
+        log "ERROR: Cannot resolve origin/production for ${repo_path}"
+        continue
+    fi
+
+    if [ "$LOCAL" = "$REMOTE" ]; then
+        log "No updates for ${repo_path}, skipping."
+        log "=========================================="
+        continue
+    fi
+
+    log "Updates found ($LOCAL -> $REMOTE), pulling..."
+    git pull origin production >> "$LOG_FILE" 2>&1 || { log "ERROR: git pull failed for ${repo_path}"; continue; }
+
+    CHANGED_FILES=$(git diff --name-only "$LOCAL" "$REMOTE" 2>/dev/null)
+
+    # ── Handle by type ───────────────────────────────────────────────────────
+    case "$repo_type" in
+
+    "CI3")
+        if echo "$CHANGED_FILES" | grep -qE 'composer\.json'; then
+            log "composer.json changed, running composer install & update..."
+            COMPOSER_ALLOW_SUPERUSER=1 composer install >> "$LOG_FILE" 2>&1 \
+                || { log "ERROR: composer install failed"; continue; }
+            COMPOSER_ALLOW_SUPERUSER=1 composer update >> "$LOG_FILE" 2>&1 \
+                || { log "ERROR: composer update failed"; continue; }
+        else
+            log "No composer.json changes, skipping composer."
+        fi
+        ;;
+
+    "NodeJS")
+        if echo "$CHANGED_FILES" | grep -qE 'package\.json'; then
+            log "package.json changed, running npm install..."
+            npm install >> "$LOG_FILE" 2>&1 || { log "ERROR: npm install failed"; continue; }
+            npm update  >> "$LOG_FILE" 2>&1 || { log "ERROR: npm update failed"; continue; }
+        else
+            log "No package.json changes, skipping npm install."
+        fi
+        ;;
+
+    "ReactJS")
+        # 1. Install dependencies jika package.json berubah
+        if echo "$CHANGED_FILES" | grep -qE 'package\.json'; then
+            log "package.json changed, running npm install..."
+            npm install >> "$LOG_FILE" 2>&1 || { log "ERROR: npm install failed"; continue; }
+            npm update  >> "$LOG_FILE" 2>&1 || { log "ERROR: npm update failed"; continue; }
+        else
+            log "No package.json changes, skipping npm install."
+        fi
+
+        # 2. Build (selalu jika ada perubahan apapun)
+        if [ -n "$CHANGED_FILES" ]; then
+            log "Changes detected, running npm run build..."
+            npm run build >> "$LOG_FILE" 2>&1 || { log "ERROR: npm run build failed"; continue; }
+
+            # 3. Reload pm2 agar hasil build langsung aktif tanpa downtime
+            log "Build success, reloading pm2..."
+            pm2 reload all >> "$LOG_FILE" 2>&1 || log "WARNING: pm2 reload failed (non-fatal)"
+        else
+            log "No file changes detected, skipping build & pm2 reload."
+        fi
+        ;;
+
+    *)
+        log "Unknown type '${repo_type}', only git pull was performed."
+        ;;
+
+    esac
+
+    log "====== Done: ${repo_path} ======"
 done
 
-echo "[$(date)] Update and deploy process completed" >> "$LOG_FILE"
+log "Deploy process completed"
